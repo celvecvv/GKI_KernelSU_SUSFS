@@ -71,3 +71,64 @@ runs:
         print("Reserved LSM capacity for built-in SukiSU Nova and BBG")
         PY
         fi
+
+        # Limit Nova rescue-key detection to early boot.
+        python3 - <<'PY'
+        from pathlib import Path
+        
+        path = Path("SukiSU-Ultra/kernel/runtime/ksud.c")
+        text = path.read_text()
+        def replace_once(old, new):
+            global text
+            if text.count(old) != 1:
+                raise SystemExit(f"Unexpected safe-mode source anchor: {old[:70]!r}")
+            text = text.replace(old, new, 1)
+        
+        replace_once('    ksu_boot_completed = true;\n    pr_info("on_boot_completed!\\n");',
+                     '    WRITE_ONCE(ksu_boot_completed, true);\n    stop_input_hook();\n    pr_info("on_boot_completed!\\n");')
+        old = '''bool ksu_is_safe_mode(void)
+        {
+            // don't need to check again, userspace may call multiple times
+            static bool already_checked = false;
+            if (already_checked)
+                return true;
+        
+            // stop hook first!
+            stop_input_hook();
+        
+            if (!safe_mode_flag)
+                return false;
+        
+            pr_info("volume keys pressed max times, safe mode detected!\\n");
+            already_checked = true;
+            return true;
+        }'''
+        new = '''bool ksu_is_safe_mode(void)
+        {
+            static bool already_checked = false;
+            static bool boot_safe_mode = false;
+        
+            if (smp_load_acquire(&already_checked))
+                return READ_ONCE(boot_safe_mode);
+        
+            stop_input_hook();
+            WRITE_ONCE(boot_safe_mode, READ_ONCE(safe_mode_flag));
+            smp_store_release(&already_checked, true);
+            if (boot_safe_mode)
+                pr_info("volume keys pressed max times, safe mode detected!\\n");
+            return boot_safe_mode;
+        }'''
+        replace_once(old, new)
+        replace_once('    if (!value)\n        return;\n\n    if (type != EV_KEY)',
+                     '    if (READ_ONCE(ksu_boot_completed) || !READ_ONCE(ksu_input_hook))\n        return;\n\n    if (value != 1)\n        return;\n\n    if (type != EV_KEY)')
+        replace_once('static void stop_input_hook(void)\n{',
+                     'static DEFINE_MUTEX(ksu_input_stop_lock);\n\nstatic void stop_input_hook(void)\n{\n    mutex_lock(&ksu_input_stop_lock);')
+        replace_once('    if (!ksu_input_hook) {\n        return;\n    }\n    ksu_input_hook = false;',
+                     '    // Also remove the input handler when SUSFS closed the hook.\n    WRITE_ONCE(ksu_input_hook, false);')
+        replace_once('    vol_detector_exit();\n}',
+                     '    vol_detector_exit();\n    mutex_unlock(&ksu_input_stop_lock);\n}')
+        replace_once('        safe_mode_flag = true;', '        WRITE_ONCE(safe_mode_flag, true);')
+        path.write_text(text)
+        print("Nova safe-mode detection restricted to early boot, first result cached")
+        
+        PY
