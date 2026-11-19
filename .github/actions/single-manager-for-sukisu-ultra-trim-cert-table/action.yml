@@ -14,3 +14,22 @@ runs:
       run: |
         set -euo pipefail
         python3 "${GITHUB_WORKSPACE}/.github/scripts/trim_sukisu_managers.py" SukiSU-Ultra
+
+        # Android GKI 6.12 registers hooks with an LSM descriptor.
+        if grep -A 1 "extern void security_add_hooks(" common/include/linux/lsm_hooks.h | grep -q "const struct lsm_id"; then
+          python3 - <<'PY'
+        from pathlib import Path
+
+        source = Path("SukiSU-Ultra/kernel/hook/lsm_hook.c")
+        old = '    security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");'
+        new = '''    static const struct lsm_id ksu_lsm_id = {
+                .name = "ksu",
+                .id = 0,
+            };
+            security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), &ksu_lsm_id);'''
+        text = source.read_text()
+        if text.count(old) != 1:
+            raise SystemExit("Expected one legacy SukiSU Nova LSM registration")
+        source.write_text(text.replace(old, new))
+        PY
+        fi
