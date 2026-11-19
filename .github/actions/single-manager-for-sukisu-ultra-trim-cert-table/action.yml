@@ -33,3 +33,41 @@ runs:
         source.write_text(text.replace(old, new))
         PY
         fi
+
+        # Reserve static LSM capacity for both out-of-tree registrations.
+        if [ -f common/include/linux/lsm_count.h ]; then
+          python3 - <<'PY'
+        from pathlib import Path
+        import re
+
+        path = Path("common/include/linux/lsm_count.h")
+        text = path.read_text()
+        if "SUKISU_BUILTIN_LSM_ENABLED" in text:
+            raise SystemExit("LSM reservation already exists")
+        offset = text.index("#define MAX_LSM_COUNT")
+        capacity = """/* Built-in Nova and BBG also register LSMs on this GKI branch. */
+        #if IS_BUILTIN(CONFIG_KSU)
+        #define SUKISU_BUILTIN_LSM_ENABLED 1,
+        #else
+        #define SUKISU_BUILTIN_LSM_ENABLED
+        #endif
+        #if IS_ENABLED(CONFIG_BBG)
+        #define BASEBAND_GUARD_LSM_ENABLED 1,
+        #else
+        #define BASEBAND_GUARD_LSM_ENABLED
+        #endif
+
+        """
+        text = text[:offset] + capacity + text[offset:]
+        anchor = re.compile(r"(?m)^(\s*)CAPABILITIES_ENABLED([\t ]*\\)$")
+        text, count = anchor.subn(
+            lambda m: m.group(1) + "SUKISU_BUILTIN_LSM_ENABLED\t\\\n"
+            + m.group(1) + "BASEBAND_GUARD_LSM_ENABLED\t\\\n"
+            + m.group(0), text
+        )
+        if count != 1:
+            raise SystemExit("Expected one capability entry in LSM counter")
+        path.write_text(text)
+        print("Reserved LSM capacity for built-in SukiSU Nova and BBG")
+        PY
+        fi
