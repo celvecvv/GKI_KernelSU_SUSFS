@@ -270,7 +270,7 @@ jobs:
           # FinaSU: susfs-integrated fork of the tiann restructure; pin tracks
           # the susfs4ksu v2.3 ABI era its supercall dispatch is written against.
           # master tip 06d71e8a (2026-11-16).
-          PIN_FINASU="06d71e8a08bb8789563e390ab1e9e6cc78ed1af2"
+          PIN_FINASU="a85c03ab6be57fd1a81a6d345eb5aa8275652b42"
           # SUSFS (gitlab simonpunk/susfs4ksu): every gki-<family> branch moved
           # two commits (2026-11-06): "KernelSU: Sync with upstream" (the
           # 10_enable_susfs_for_ksu patch, +9 lines) and "kernel: ratelimit on
