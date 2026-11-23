@@ -43,6 +43,16 @@ runs:
           exit 0
         fi
 
+        # Explicit meow release requested without the Android baseline suffix.
+        # Change display branding only; keep kernel source and ABI gates intact.
+        if [ "$BRAND" = "meow" ] && [ "$VERSION" = "android16-6.12" ] && [ "$KEEP_KMI" != "true" ]; then
+          sed -i '$d' scripts/setlocalversion
+          printf 'echo "%s.%s-%s"\n' "$KERNEL_PART" "${{ inputs.sublevel }}" "$BRAND" >> scripts/setlocalversion
+          chmod +x scripts/setlocalversion
+          tail -n 1 scripts/setlocalversion
+          exit 0
+        fi
+
         KMI=""
         if [ "$KEEP_KMI" = "true" ]; then
           KMI=$(grep -h "^KMI_GENERATION" build.config.common build.config.constants 2>/dev/null | head -n 1 | cut -d= -f2)
