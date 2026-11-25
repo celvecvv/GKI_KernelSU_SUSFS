@@ -152,6 +152,11 @@ jobs:
             --set-str UNUSED_KSYMS_WHITELIST "$out/abi_symbollist.raw"
           export PATH="$root/clang/bin:$root/rust/bin:$PATH"
           export LIBCLANG_PATH=/usr/lib/llvm-19/lib KBUILD_GENDWARFKSYMS_STABLE=1
+          # Use the same Rust crate disambiguator as the Android Kleaf build.
+          export RUSTC_FORCE_RUSTC_VERSION=rustc-android
+          printf '%s\n' 'pub fn abi_probe() -> usize { 1 }' > "$root/rust_abi_probe.rs"
+          rustc --crate-name kernel --crate-type rlib -Csymbol-mangling-version=v0 --emit="obj=$root/rust_abi_probe.o" "$root/rust_abi_probe.rs"
+          llvm-nm --defined-only "$root/rust_abi_probe.o" | grep -F 'CsdfZWD8DztAw_6kernel'
           flags=(O="$out" ARCH=arm64 LLVM=1 BINDGEN="$root/bindgen" PAHOLE="$root/bin/pahole" KCFLAGS=-D__ANDROID_COMMON_KERNEL__
             KSU_EXPECTED_SIZE=0x02cc KSU_EXPECTED_HASH=2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458
             KSU_PRESET_MANAGER_MASK=0)
