@@ -1,0 +1,217 @@
+name: Obsidian FinaSU 1.7.0 AK3
+on:
+  push:
+    branches: [obsidian-finasu-170]
+    paths: [.github/workflows/obsidian-finasu-170.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bc bison cpio dwarves flex libclang-19-dev libdw-dev libelf-dev libssl-dev lz4 python3-venv
+          python3 -m venv .abi-tools
+          .abi-tools/bin/pip install lz4 zstandard peewee
+      - name: Fetch device baseline, compiler and root sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/{kernel,out,clang/bin,clang/lib/clang,rust} dist
+          cd build
+          fetch() { curl --fail --location --silent --show-error --retry 3 --output "$2" "$1"; }
+          kernel_rev=6e872b4863d6dd892490c32d973db1a9df8d3710
+          fetch "https://codeload.github.com/aosp-mirror/kernel_common/tar.gz/$kernel_rev" kernel.tar.gz
+          tar -xzf kernel.tar.gz --strip-components=1 -C kernel
+          clang_url=https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-2025/clang-r536225
+          fetch "$clang_url/bin.tar.gz" clang-bin.tar.gz & clang_bin=$!
+          fetch "$clang_url/lib/clang.tar.gz" clang-lib.tar.gz & clang_lib=$!
+          fetch https://android.googlesource.com/platform/prebuilts/rust/+archive/refs/heads/main-kernel-2025/linux-x86/1.82.0.tar.gz rust.tar.gz & rust_pkg=$!
+          fetch 'https://android.googlesource.com/platform/prebuilts/clang-tools/+/refs/heads/main-kernel-2025/linux-x86/bin/bindgen?format=TEXT' bindgen.b64
+          base64 -d bindgen.b64 > bindgen
+          chmod +x bindgen
+          git -c advice.detachedHead=false clone --single-branch --branch v1.7.0 https://github.com/LyraVoid/FinaSU.git finasu
+          test "$(git -C finasu rev-parse HEAD)" = a85c03ab6be57fd1a81a6d345eb5aa8275652b42
+          git init -q susfs
+          git -C susfs fetch --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git 9b0b13f069673b9b07b713a5c66977de4d62b175
+          git -C susfs checkout --detach FETCH_HEAD
+          fetch https://raw.githubusercontent.com/ChkDumps/redmi_obsidian_dump/HEAD/boot/kernel stock-Image
+          echo '0e7049221a75e9801d62a98cd6e4b2f7ce57304aae7e6e5e9957658fa67f09d0  stock-Image' | sha256sum -c
+          git clone --depth=1 https://github.com/marin-m/vmlinux-to-elf.git abi-parser
+          git -C abi-parser rev-parse HEAD
+          helpers=https://raw.githubusercontent.com/celvecvv/GKI_KernelSU_SUSFS/20363f020820bdfa71efae34bc32b2fc8a5a9cc6/.github/scripts
+          for helper in apply_susfs_compat.py susfs_guard_priority_helpers.py susfs_restore_context.py; do
+            fetch "$helpers/$helper" "$helper"
+          done
+          fetch https://github.com/LingLuo17/AnyKernel3/releases/download/v2.4.0-r2/FinaSU-33203-android16-6.12-30-AnyKernel3.zip ak3-template.zip
+          echo 'fc20c34532dc29131d8540149090a7446c06101eacda505993d44c8480760113  ak3-template.zip' | sha256sum -c
+          wait "$clang_bin" "$clang_lib" "$rust_pkg"
+          tar -xzf clang-bin.tar.gz -C clang/bin
+          tar -xzf clang-lib.tar.gz -C clang/lib/clang
+          tar -xzf rust.tar.gz -C rust
+      - name: Configure and compile obsidian kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/build"
+          cd "$root/kernel"
+          sh "$root/finasu/kernel/setup.sh" --dir "$root/finasu" v1.7.0
+          patch_dir="$root/susfs/kernel_patches"
+          patch_file="$patch_dir/50_add_susfs_in_gki-android16-6.12.patch"
+          cp -a "$patch_dir/fs/." fs/
+          cp -a "$patch_dir/include/linux/." include/linux/
+          python3 "$root/susfs_guard_priority_helpers.py" fs/susfs.c
+          python3 "$root/susfs_restore_context.py" "$patch_file" "$PWD"
+          python3 "$root/apply_susfs_compat.py" "$PWD" "$patch_file"
+          cat > "$root/verify_abi.py" <<'PY'
+          import gzip
+          import json
+          import re
+          import struct
+          import sys
+          from pathlib import Path
+          from vmlinux_to_elf.core.kallsyms import KallsymsFinder
+
+          root = Path(__file__).resolve().parent
+
+          def exports(data):
+              syms = KallsymsFinder(data, 64).name_to_symbol
+              base = syms['_text'].virtual_address
+              result = {}
+              for suffix in ('', '_gpl'):
+                  def offset(label):
+                      return syms[label + suffix].virtual_address - base
+                  first = offset('__start___ksymtab')
+                  last = offset('__stop___ksymtab')
+                  crc_start = offset('__start___kcrctab')
+                  crc_end = offset('__stop___kcrctab')
+                  for off, crc in zip(range(first, last, 12), range(crc_start, crc_end, 4), strict=True):
+                      start = off + 4 + struct.unpack_from('<i', data, off + 4)[0]
+                      name = data[start:data.index(0, start)].decode('ascii')
+                      assert re.fullmatch(r'[a-zA-Z0-9_.$]+', name), name
+                      result[name] = struct.unpack_from('<I', data, crc)[0]
+              return result
+
+          out = root / 'out'
+          if sys.argv[1] == 'prepare':
+              stock = (root / 'stock-Image').read_bytes()
+              start = stock.index(b'IKCFG_ST') + 8
+              (out / '.config').write_bytes(gzip.decompress(stock[start:stock.index(b'IKCFG_ED', start)]))
+              (out / 'stock-public-cert.der').write_bytes(stock[37312768:37312768 + 1357])
+              crc = exports(stock)
+              assert len(crc) == 8892
+              (out / 'stock-crc.json').write_text(json.dumps(crc))
+              allowed = set(crc)
+              for item in Path('gki/aarch64/symbols').iterdir():
+                  if item.is_file():
+                      allowed.update(line for line in map(str.strip, item.read_text().splitlines())
+                                     if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.$]*', line))
+              (out / 'abi_symbollist.raw').write_text('\n'.join(sorted(allowed)) + '\n')
+              modules = {}
+              exec(Path('modules.bzl').read_text(), modules)
+              protected = modules['get_gki_protected_modules_list']('arm64')
+              (out / 'protected_module_names_list').write_text('\n'.join(p.removesuffix('.ko') for p in protected) + '\n')
+          else:
+              stock = json.loads((out / 'stock-crc.json').read_text())
+              image = (out / 'arch/arm64/boot/Image').read_bytes()
+              assert image[56:60] == b'ARMd' and (struct.unpack_from('<Q', image, 24)[0] & 6) == 2
+              assert b'6.12.30-android16-5-finasu-4k' in re.search(rb'Linux version [^\x00\n]+', image)[0]
+              current = exports(image)
+              missing = sorted(stock.keys() - current.keys())
+              changed = sorted(name for name in stock.keys() & current.keys() if stock[name] != current[name])
+              print(f'Stock exports: {len(stock)}. Missing: {missing}. Changed CRCs: {changed}.')
+              assert not missing and not changed, 'Stock-module ABI check failed'
+          PY
+          export PYTHONPATH="$root/abi-parser"
+          py="$GITHUB_WORKSPACE/.abi-tools/bin/python"
+          "$py" "$root/verify_abi.py" prepare
+          out="$root/out"
+          openssl x509 -inform DER -in "$out/stock-public-cert.der" -out "$out/stock-public-cert.pem"
+          scripts/config --file "$out/.config" \
+            --enable KSU --enable KSU_SUSFS --enable KSU_HOOK_SUSFS_INLINE --disable KSU_HOOK_TRACEPOINT \
+            --enable KSU_SUSFS_SUS_PATH --enable KSU_SUSFS_SUS_MOUNT --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_ENABLE_LOG --enable KSU_SUSFS_OPEN_REDIRECT --enable KSU_SUSFS_SUS_MAP \
+            --enable KSU_SUSFS_PRIORITY_UID_FILTER --disable KSU_DYNAMIC_MANAGER \
+            --set-str LOCALVERSION '-android16-5-finasu-4k' --disable LOCALVERSION_AUTO \
+            --set-str SYSTEM_TRUSTED_KEYS "$out/stock-public-cert.pem" \
+            --set-str MODULE_SIG_PROTECT_LIST "$out/protected_module_names_list" \
+            --set-str UNUSED_KSYMS_WHITELIST "$out/abi_symbollist.raw"
+          export PATH="$root/clang/bin:$root/rust/bin:$PATH"
+          export LIBCLANG_PATH=/usr/lib/llvm-19/lib KBUILD_GENDWARFKSYMS_STABLE=1
+          flags=(O="$out" ARCH=arm64 LLVM=1 BINDGEN="$root/bindgen" KCFLAGS=-D__ANDROID_COMMON_KERNEL__
+            KSU_EXPECTED_SIZE=0x02cc KSU_EXPECTED_HASH=2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458
+            KSU_PRESET_MANAGER_MASK=0)
+          make "${flags[@]}" olddefconfig
+          for option in ARM64_4K_PAGES KSU KSU_SUSFS KSU_HOOK_SUSFS_INLINE RUST GENDWARFKSYMS EXTENDED_MODVERSIONS MODULE_SIG_PROTECT LTO_NONE; do
+            grep -Fx "CONFIG_$option=y" "$out/.config"
+          done
+          make -j"$(nproc)" "${flags[@]}" Image modules
+          "$py" "$root/verify_abi.py" verify
+      - name: Package AnyKernel3 for obsidian
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd build
+          image=out/arch/arm64/boot/Image
+          digest=$(sha256sum "$image" | cut -d' ' -f1)
+          cat > anykernel.sh <<'AK3'
+          properties() { '
+          kernel.string=FinaSU 1.7.0 and SUSFS 2.4.0 for Redmi Note 14 Pro 4G (obsidian)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          do.check_boot_version=0
+          device.name1=obsidian
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+          block=boot
+          is_slot_device=auto
+          ramdisk_compression=auto
+          patch_vbmeta_flag=0
+          no_magisk_check=1
+          . tools/ak3-core.sh
+          case "$(getprop ro.boot.vbmeta.device_state):$(getprop ro.boot.flash.locked)" in
+            unlocked:*|*:0) ;;
+            *) abort 'An unlocked bootloader is required.' ;;
+          esac
+          version_ok=
+          for prop in ro.build.version.incremental ro.system.build.version.incremental ro.vendor.build.version.incremental; do
+            case "$(getprop "$prop")" in
+              OS3.0.305.0.WOFMIXM|OS3.0.305.0.WOFMIXM.C10|3.0.305.0.WOFMIXM|3.0.305.0.WOFMIXM.C10) version_ok=1; break ;;
+            esac
+          done
+          [ "$version_ok" = 1 ] || abort 'This ZIP requires Global HyperOS 3.0.305.0.WOFMIXM.'
+          split_boot
+          [ ! -f "$SPLITIMG/ramdisk.cpio" ] && [ -f "$SPLITIMG/kernel" ] || abort 'Unexpected boot image layout.'
+          current_digest=$(sha256sum "$SPLITIMG/kernel" | cut -d' ' -f1)
+          case "$current_digest" in
+            0e7049221a75e9801d62a98cd6e4b2f7ce57304aae7e6e5e9957658fa67f09d0|CUSTOM_DIGEST) ;;
+            *) abort 'Unexpected kernel in boot. Restore the stock boot image for this firmware.' ;;
+          esac
+          flash_boot
+          AK3
+          sed -i "s/CUSTOM_DIGEST/$digest/" anykernel.sh
+          bash -n anykernel.sh
+          unzip -q ak3-template.zip -d ak3
+          install -m 755 anykernel.sh ak3/anykernel.sh
+          install -m 644 "$image" ak3/Image
+          rm -f ak3/banner
+          (cd ak3 && zip -q -r ../../dist/FinaSU-1.7.0-obsidian-AnyKernel3.zip .)
+          unzip -t ../dist/FinaSU-1.7.0-obsidian-AnyKernel3.zip
+          sha256sum ../dist/FinaSU-1.7.0-obsidian-AnyKernel3.zip
+      - name: Upload the AK3 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: FinaSU-1.7.0-obsidian-AnyKernel3
+          path: dist/FinaSU-1.7.0-obsidian-AnyKernel3.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
