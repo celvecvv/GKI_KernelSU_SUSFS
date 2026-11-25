@@ -24,13 +24,26 @@ jobs:
           mkdir -p build/{kernel,out,clang/bin,clang/lib/clang,rust} dist
           cd build
           fetch() { curl --fail --location --silent --show-error --retry 3 --output "$2" "$1"; }
+          fetch_archive() {
+            local url="$1" file="$2" attempt
+            for attempt in 1 2 3 4; do
+              echo "Fetching $file (attempt $attempt)"
+              if fetch "$url" "$file.part" && gzip -t "$file.part"; then
+                mv "$file.part" "$file"
+                return 0
+              fi
+              sleep 5
+            done
+            echo "Unable to download a complete $file" >&2
+            return 1
+          }
           kernel_rev=6e872b4863d6dd892490c32d973db1a9df8d3710
-          fetch "https://codeload.github.com/aosp-mirror/kernel_common/tar.gz/$kernel_rev" kernel.tar.gz
+          fetch_archive "https://codeload.github.com/aosp-mirror/kernel_common/tar.gz/$kernel_rev" kernel.tar.gz
           tar -xzf kernel.tar.gz --strip-components=1 -C kernel
           clang_url=https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-2025/clang-r536225
-          fetch "$clang_url/bin.tar.gz" clang-bin.tar.gz & clang_bin=$!
-          fetch "$clang_url/lib/clang.tar.gz" clang-lib.tar.gz & clang_lib=$!
-          fetch https://android.googlesource.com/platform/prebuilts/rust/+archive/refs/heads/main-kernel-2025/linux-x86/1.82.0.tar.gz rust.tar.gz & rust_pkg=$!
+          fetch_archive "$clang_url/bin.tar.gz" clang-bin.tar.gz & clang_bin=$!
+          fetch_archive "$clang_url/lib/clang.tar.gz" clang-lib.tar.gz & clang_lib=$!
+          fetch_archive https://android.googlesource.com/platform/prebuilts/rust/+archive/refs/heads/main-kernel-2025/linux-x86/1.82.0.tar.gz rust.tar.gz & rust_pkg=$!
           fetch 'https://android.googlesource.com/platform/prebuilts/clang-tools/+/refs/heads/main-kernel-2025/linux-x86/bin/bindgen?format=TEXT' bindgen.b64
           base64 -d bindgen.b64 > bindgen
           chmod +x bindgen
@@ -59,7 +72,9 @@ jobs:
           done
           fetch https://github.com/LingLuo17/AnyKernel3/releases/download/v2.4.0-r2/FinaSU-33203-android16-6.12-30-AnyKernel3.zip ak3-template.zip
           echo 'fc20c34532dc29131d8540149090a7446c06101eacda505993d44c8480760113  ak3-template.zip' | sha256sum -c
-          wait "$clang_bin" "$clang_lib" "$rust_pkg"
+          wait "$clang_bin"
+          wait "$clang_lib"
+          wait "$rust_pkg"
           tar -xzf clang-bin.tar.gz -C clang/bin
           tar -xzf clang-lib.tar.gz -C clang/lib/clang
           tar -xzf rust.tar.gz -C rust
