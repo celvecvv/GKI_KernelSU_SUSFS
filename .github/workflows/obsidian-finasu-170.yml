@@ -14,7 +14,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bc bison cpio dwarves flex libclang-19-dev libdw-dev libelf-dev libssl-dev lz4 python3-venv
+          sudo apt-get install -y --no-install-recommends bc bison cpio flex libclang-19-dev libdw-dev libelf-dev libssl-dev lz4 python3-venv
           python3 -m venv .abi-tools
           .abi-tools/bin/pip install lz4 zstandard peewee
       - name: Fetch device baseline, compiler and root sources
@@ -34,6 +34,16 @@ jobs:
           fetch 'https://android.googlesource.com/platform/prebuilts/clang-tools/+/refs/heads/main-kernel-2025/linux-x86/bin/bindgen?format=TEXT' bindgen.b64
           base64 -d bindgen.b64 > bindgen
           chmod +x bindgen
+          android_tools=https://android.googlesource.com/kernel/prebuilts/build-tools/+/refs/heads/main-kernel-2025/linux-x86
+          mkdir -p bin lib64
+          fetch "$android_tools/bin/pahole?format=TEXT" pahole.b64
+          fetch "$android_tools/lib64/libc++.so?format=TEXT" libcxx.b64
+          base64 -d pahole.b64 > bin/pahole
+          base64 -d libcxx.b64 > lib64/libc++.so
+          echo '03785239d7f5d4f65ef849da5b7369e40850434acad7b64127d68d25ff8e2a13  bin/pahole' | sha256sum -c
+          echo 'ae96f11d788644103731b2087e6136ac059e781f4cf7a5d9ab8bc343c879cd2f  lib64/libc++.so' | sha256sum -c
+          chmod +x bin/pahole
+          bin/pahole --version
           git -c advice.detachedHead=false clone --single-branch --branch v1.7.0 https://github.com/LyraVoid/FinaSU.git finasu
           test "$(git -C finasu rev-parse HEAD)" = a85c03ab6be57fd1a81a6d345eb5aa8275652b42
           git init -q susfs
@@ -142,11 +152,11 @@ jobs:
             --set-str UNUSED_KSYMS_WHITELIST "$out/abi_symbollist.raw"
           export PATH="$root/clang/bin:$root/rust/bin:$PATH"
           export LIBCLANG_PATH=/usr/lib/llvm-19/lib KBUILD_GENDWARFKSYMS_STABLE=1
-          flags=(O="$out" ARCH=arm64 LLVM=1 BINDGEN="$root/bindgen" KCFLAGS=-D__ANDROID_COMMON_KERNEL__
+          flags=(O="$out" ARCH=arm64 LLVM=1 BINDGEN="$root/bindgen" PAHOLE="$root/bin/pahole" KCFLAGS=-D__ANDROID_COMMON_KERNEL__
             KSU_EXPECTED_SIZE=0x02cc KSU_EXPECTED_HASH=2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458
             KSU_PRESET_MANAGER_MASK=0)
           make "${flags[@]}" olddefconfig
-          for option in ARM64_4K_PAGES KSU KSU_SUSFS KSU_HOOK_SUSFS_INLINE RUST GENDWARFKSYMS EXTENDED_MODVERSIONS MODULE_SIG_PROTECT LTO_NONE; do
+          for option in ARM64_4K_PAGES KSU KSU_SUSFS KSU_HOOK_SUSFS_INLINE RUST GENDWARFKSYMS EXTENDED_MODVERSIONS MODULE_SIG_PROTECT LTO_NONE DEBUG_INFO_BTF DEBUG_INFO_BTF_MODULES; do
             grep -Fx "CONFIG_$option=y" "$out/.config"
           done
           make -j"$(nproc)" "${flags[@]}" Image modules
